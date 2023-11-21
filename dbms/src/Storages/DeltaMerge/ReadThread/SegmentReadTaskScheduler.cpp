@@ -39,22 +39,20 @@ void SegmentReadTaskScheduler::add(const SegmentReadTaskPoolPtr & pool)
     read_pools.add(pool);
 
     const auto & tasks = pool->getTasks();
-    for (const auto & pa : tasks)
+    for (const auto & [seg_id, task] : tasks)
     {
-        auto seg_id = pa.first;
-        merging_segments[pool->physical_table_id][seg_id].push_back(pool->pool_id);
+        merging_segments[seg_id].push_back(pool->pool_id);
     }
     auto block_slots = pool->getFreeBlockSlots();
     LOG_DEBUG(
         log,
-        "Added, pool_id={} table_id={} block_slots={} segment_count={} pool_count={} cost={}ns do_add_cost={}ns", //
+        "Added, pool_id={} block_slots={} segment_count={} pool_count={} cost={:.3f}us do_add_cost={:.3f}us", //
         pool->pool_id,
-        pool->physical_table_id,
         block_slots,
         tasks.size(),
         read_pools.size(),
-        sw_add.elapsed(),
-        sw_do_add.elapsed());
+        sw_add.elapsed() / 1000.0,
+        sw_do_add.elapsed() / 1000.0);
 }
 
 std::pair<MergedTaskPtr, bool> SegmentReadTaskScheduler::scheduleMergedTask()
@@ -123,9 +121,39 @@ SegmentReadTaskPools SegmentReadTaskScheduler::getPoolsUnlock(const std::vector<
 
 bool SegmentReadTaskScheduler::needScheduleToRead(const SegmentReadTaskPoolPtr & pool)
 {
-    return pool->getFreeBlockSlots() > 0 && // Block queue is not full and
-        (merged_task_pool.has(pool->pool_id) || // can schedule a segment from MergedTaskPool or
-         pool->getFreeActiveSegments() > 0); // schedule a new segment.
+    if (pool->getFreeBlockSlots() <= 0)
+    {
+        GET_METRIC(tiflash_storage_read_thread_counter, type_sche_no_slot).Increment();
+        return false;
+    }
+
+    if (pool->isRUExhausted())
+    {
+        GET_METRIC(tiflash_storage_read_thread_counter, type_sche_no_ru).Increment();
+        return false;
+    }
+
+    // Check if there are segments that can be scheduled:
+    // 1. There are already activated segments.
+    if (merged_task_pool.has(pool->pool_id))
+    {
+        return true;
+    }
+    // 2. Not reach limitation, we can activate a segment.
+    if (pool->getFreeActiveSegments() > 0 && pool->getPendingSegmentCount() > 0)
+    {
+        return true;
+    }
+
+    if (pool->getFreeActiveSegments() <= 0)
+    {
+        GET_METRIC(tiflash_storage_read_thread_counter, type_sche_active_segment_limit).Increment();
+    }
+    else
+    {
+        GET_METRIC(tiflash_storage_read_thread_counter, type_sche_no_segment).Increment();
+    }
+    return false;
 }
 
 SegmentReadTaskPoolPtr SegmentReadTaskScheduler::scheduleSegmentReadTaskPoolUnlock()
@@ -145,45 +173,30 @@ SegmentReadTaskPoolPtr SegmentReadTaskScheduler::scheduleSegmentReadTaskPoolUnlo
     {
         GET_METRIC(tiflash_storage_read_thread_counter, type_sche_no_pool).Increment();
     }
-    else
-    {
-        GET_METRIC(tiflash_storage_read_thread_counter, type_sche_no_slot).Increment();
-    }
     return nullptr;
 }
 
-std::optional<std::pair<uint64_t, std::vector<uint64_t>>> SegmentReadTaskScheduler::scheduleSegmentUnlock(
+std::optional<std::pair<GlobalSegmentID, std::vector<UInt64>>> SegmentReadTaskScheduler::scheduleSegmentUnlock(
     const SegmentReadTaskPoolPtr & pool)
 {
     auto expected_merge_seg_count = std::min(read_pools.size(), 2); // Not accurate.
-    auto itr = merging_segments.find(pool->physical_table_id);
-    if (itr == merging_segments.end())
-    {
-        // No segment of tableId left.
-        return std::nullopt;
-    }
-    std::optional<std::pair<uint64_t, std::vector<uint64_t>>> result;
-    auto & segments = itr->second;
-    auto target = pool->scheduleSegment(segments, expected_merge_seg_count);
-    if (target != segments.end())
+
+    std::optional<std::pair<GlobalSegmentID, std::vector<uint64_t>>> result;
+    auto target = pool->scheduleSegment(merging_segments, expected_merge_seg_count);
+    if (target != merging_segments.end())
     {
         if (MergedTask::getPassiveMergedSegments() < 100 || target->second.size() == 1)
         {
             result = *target;
-            segments.erase(target);
-            if (segments.empty())
-            {
-                merging_segments.erase(itr);
-            }
+            merging_segments.erase(target);
         }
         else
         {
             result = std::pair{target->first, std::vector<uint64_t>(1, pool->pool_id)};
-            auto mutable_target = segments.find(target->first);
-            auto itr = std::find(mutable_target->second.begin(), mutable_target->second.end(), pool->pool_id);
-            *itr = mutable_target->second
+            auto itr = std::find(target->second.begin(), target->second.end(), pool->pool_id);
+            *itr = target->second
                        .back(); // SegmentReadTaskPool::scheduleSegment ensures `pool->poolId` must exists in `target`.
-            mutable_target->second.resize(mutable_target->second.size() - 1);
+            target->second.resize(target->second.size() - 1);
         }
     }
     return result;

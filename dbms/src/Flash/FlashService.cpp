@@ -279,11 +279,14 @@ grpc::Status FlashService::Coprocessor(
         });
         CoprocessorContext cop_context(*db_context, request->context(), *grpc_context);
         auto request_identifier = fmt::format(
-            "Coprocessor, is_remote_read: {}, start_ts: {}, region_info: {}, resource_group: {}",
+            "Coprocessor, is_remote_read: {}, start_ts: {}, region_info: {}, resource_group: {}, conn_id: {}, "
+            "conn_alias: {}",
             is_remote_read,
             request->start_ts(),
             region_info,
-            request->context().resource_control_context().resource_group_name());
+            request->context().resource_control_context().resource_group_name(),
+            request->connection_id(),
+            request->connection_alias());
         CoprocessorHandler<false> cop_handler(cop_context, request, response, request_identifier);
         return cop_handler.execute();
     };
@@ -300,7 +303,12 @@ grpc::Status FlashService::Coprocessor(
     };
     grpc::Status ret = cop_limiter->executeFor(std::move(exec_func), max_queued_duration_ms, std::move(timeout_func));
 
-    LOG_IMPL(log, log_level, "Handle coprocessor request done: {}, {}", ret.error_code(), ret.error_message());
+    LOG_IMPL(
+        log,
+        log_level,
+        "Handle coprocessor request done: {}, {}",
+        magic_enum::enum_name(ret.error_code()),
+        ret.error_message());
     return ret;
 }
 
@@ -335,14 +343,20 @@ grpc::Status FlashService::BatchCoprocessor(
         }
         CoprocessorContext cop_context(*db_context, request->context(), *grpc_context);
         auto request_identifier = fmt::format(
-            "BatchCoprocessor, start_ts: {}, resource_group: {}",
+            "BatchCoprocessor, start_ts: {}, resource_group: {}, conn_id: {}, conn_alias: {}",
             request->start_ts(),
-            request->context().resource_control_context().resource_group_name());
+            request->context().resource_control_context().resource_group_name(),
+            request->connection_id(),
+            request->connection_alias());
         BatchCoprocessorHandler cop_handler(cop_context, request, writer, request_identifier);
         return cop_handler.execute();
     });
 
-    LOG_INFO(log, "Handle batch coprocessor request done: {}, {}", ret.error_code(), ret.error_message());
+    LOG_INFO(
+        log,
+        "Handle batch coprocessor request done: {}, {}",
+        magic_enum::enum_name(ret.error_code()),
+        ret.error_message());
     return ret;
 }
 
@@ -459,7 +473,12 @@ grpc::Status FlashService::CoprocessorStream(
     grpc::Status ret
         = cop_stream_limiter->executeFor(std::move(exec_func), max_queued_duration_ms, std::move(timeout_func));
 
-    LOG_IMPL(log, log_level, "Handle coprocessor stream request done: {}, {}", ret.error_code(), ret.error_message());
+    LOG_IMPL(
+        log,
+        log_level,
+        "Handle coprocessor stream request done: {}, {}",
+        magic_enum::enum_name(ret.error_code()),
+        ret.error_message());
     return ret;
 }
 

@@ -108,7 +108,7 @@ void DeltaMergeStore::cleanPreIngestFiles(
 {
     auto dm_context = newDMContext(db_context, db_settings);
     auto delegate = dm_context->path_pool->getStableDiskDelegator();
-    auto file_provider = dm_context->db_context.getFileProvider();
+    auto file_provider = dm_context->global_context.getFileProvider();
 
     for (const auto & f : external_files)
     {
@@ -144,7 +144,7 @@ Segments DeltaMergeStore::ingestDTFilesUsingColumnFile(
     bool clear_data_in_range)
 {
     auto delegate = dm_context->path_pool->getStableDiskDelegator();
-    auto file_provider = dm_context->db_context.getFileProvider();
+    auto file_provider = dm_context->global_context.getFileProvider();
 
     Segments updated_segments;
     RowKeyRange cur_range = range;
@@ -452,7 +452,7 @@ bool DeltaMergeStore::ingestDTFileIntoSegmentUsingSplit(
          */
 
         auto delegate = dm_context.path_pool->getStableDiskDelegator();
-        auto file_provider = dm_context.db_context.getFileProvider();
+        auto file_provider = dm_context.global_context.getFileProvider();
 
         WriteBatches wbs(*storage_pool, dm_context.getWriteLimiter());
 
@@ -605,7 +605,7 @@ UInt64 DeltaMergeStore::ingestFiles(
         }
 
         // Check whether all external files are contained by the range.
-        if (dm_context->db_context.getSettingsRef().dt_enable_ingest_check)
+        if (dm_context->global_context.getSettingsRef().dt_enable_ingest_check)
         {
             for (const auto & ext_file : external_files)
             {
@@ -627,17 +627,17 @@ UInt64 DeltaMergeStore::ingestFiles(
     EventRecorder write_block_recorder(ProfileEvents::DMWriteFile, ProfileEvents::DMWriteFileNS);
 
     auto delegate = dm_context->path_pool->getStableDiskDelegator();
-    auto file_provider = dm_context->db_context.getFileProvider();
+    auto file_provider = dm_context->global_context.getFileProvider();
 
     size_t rows = 0;
     size_t bytes = 0;
     size_t bytes_on_disk = 0;
 
-    auto remote_data_store = dm_context->db_context.getSharedContextDisagg()->remote_data_store;
+    auto remote_data_store = dm_context->global_context.getSharedContextDisagg()->remote_data_store;
     StoreID store_id = InvalidStoreID;
     if (remote_data_store)
     {
-        store_id = dm_context->db_context.getTMTContext().getKVStore()->getStoreID();
+        store_id = dm_context->global_context.getTMTContext().getKVStore()->getStoreID();
     }
 
     DMFiles files;
@@ -747,10 +747,22 @@ UInt64 DeltaMergeStore::ingestFiles(
     Segments updated_segments;
     if (!range.none())
     {
-        if (use_split_replace)
-            updated_segments = ingestDTFilesUsingSplit(dm_context, range, external_files, files, clear_data_in_range);
-        else
-            updated_segments = ingestDTFilesUsingColumnFile(dm_context, range, files, clear_data_in_range);
+        bool has_segments = true;
+        {
+            std::shared_lock lock(read_write_mutex);
+            if (segments.empty())
+            {
+                has_segments = false;
+            }
+        }
+        if (has_segments || !external_files.empty())
+        {
+            if (use_split_replace)
+                updated_segments
+                    = ingestDTFilesUsingSplit(dm_context, range, external_files, files, clear_data_in_range);
+            else
+                updated_segments = ingestDTFilesUsingColumnFile(dm_context, range, files, clear_data_in_range);
+        }
     }
 
     // Enable gc for DTFile after all segment applied.
@@ -758,7 +770,7 @@ UInt64 DeltaMergeStore::ingestFiles(
     // Assume that one segment get compacted after file ingested, `gc_handle` gc the
     // DTFiles before they get applied to all segments. Then we will apply some
     // deleted DTFiles to other segments.
-    if (auto data_store = dm_context->db_context.getSharedContextDisagg()->remote_data_store; !data_store)
+    if (auto data_store = dm_context->global_context.getSharedContextDisagg()->remote_data_store; !data_store)
     {
         for (auto & file : files)
             file->enableGC();

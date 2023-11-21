@@ -14,16 +14,10 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
-#include <memory>
-
-namespace DB::DM::Remote
+namespace DB
 {
 
-class RNReadTask;
-using RNReadTaskPtr = std::shared_ptr<RNReadTask>;
+struct RegionQueryInfo;
+struct MvccQueryInfo;
 
-class RNReadSegmentTask;
-using RNReadSegmentTaskPtr = std::shared_ptr<RNReadSegmentTask>;
-
-} // namespace DB::DM::Remote
+} // namespace DB

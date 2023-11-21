@@ -28,6 +28,7 @@
 
 #include <ext/scope_guard.h>
 #include <mutex>
+#include <shared_mutex>
 
 // to make GCC 11 happy
 #include <cassert>
@@ -364,12 +365,40 @@ namespace DB
       F(type_worker_fetch_page, {{"type", "worker_fetch_page"}}, ExpBuckets{0.01, 2, 20}),                                          \
       F(type_worker_prepare_stream, {{"type", "worker_prepare_stream"}}, ExpBuckets{0.01, 2, 20}),                                  \
       F(type_stream_wait_next_task, {{"type", "stream_wait_next_task"}}, ExpBuckets{0.01, 2, 20}),                                  \
-      F(type_stream_read, {{"type", "stream_read"}}, ExpBuckets{0.01, 2, 20}))                                                      \
+      F(type_stream_read, {{"type", "stream_read"}}, ExpBuckets{0.01, 2, 20}),                                                      \
+      F(type_deserialize_page, {{"type", "deserialize_page"}}, ExpBuckets{0.01, 2, 20}))                                            \
     M(tiflash_disaggregated_details,                                                                                                \
       "",                                                                                                                           \
       Counter,                                                                                                                      \
       F(type_cftiny_read, {{"type", "cftiny_read"}}),                                                                               \
       F(type_cftiny_fetch, {{"type", "cftiny_fetch"}}))                                                                             \
+    M(tiflash_fap_task_result,                                                                                                      \
+      "",                                                                                                                           \
+      Counter,                                                                                                                      \
+      F(type_total, {{"type", "total"}}),                                                                                           \
+      F(type_failed_other, {{"type", "failed_other"}}),                                                                             \
+      F(type_failed_cancel, {{"type", "failed_cancel"}}),                                                                           \
+      F(type_failed_timeout, {{"type", "failed_timeout"}}),                                                                         \
+      F(type_succeed, {{"type", "succeed"}}))                                                                                       \
+    M(tiflash_fap_task_state,                                                                                                       \
+      "",                                                                                                                           \
+      Gauge,                                                                                                                        \
+      F(type_ongoing, {{"type", "ongoing"}}),                                                                                       \
+      F(type_ingesting_stage, {{"type", "ingesting_stage"}}),                                                                       \
+      F(type_building_stage, {{"type", "building_stage"}}))                                                                         \
+    M(tiflash_fap_nomatch_reason,                                                                                                   \
+      "",                                                                                                                           \
+      Counter,                                                                                                                      \
+      F(type_conf, {{"type", "conf"}}),                                                                                             \
+      F(type_region_state, {{"type", "region_state"}}),                                                                             \
+      F(type_no_meta, {{"type", "no_meta"}}))                                                                                       \
+    M(tiflash_fap_task_duration_seconds,                                                                                            \
+      "",                                                                                                                           \
+      Histogram,                                                                                                                    \
+      F(type_build_stage, {{"type", "build_stage"}}, ExpBuckets{0.05, 2, 60}),                                                      \
+      F(type_success, {{"type", "success"}}, ExpBuckets{0.05, 2, 60}),                                                              \
+      F(type_ingest_stage, {{"type", "ingest_stage"}}, ExpBuckets{0.05, 2, 60}),                                                    \
+      F(type_total, {{"type", "total"}}, ExpBuckets{0.05, 2, 60}))                                                                  \
     M(tiflash_raft_command_duration_seconds,                                                                                        \
       "Bucketed histogram of some raft command: apply snapshot and ingest SST",                                                     \
       Histogram, /* these command usually cost several seconds, increase the start bucket to 50ms */                                \
@@ -378,7 +407,11 @@ namespace DB
       F(type_ingest_sst_sst2dt, {{"type", "ingest_sst_sst2dt"}}, ExpBuckets{0.05, 2, 10}),                                          \
       F(type_ingest_sst_upload, {{"type", "ingest_sst_upload"}}, ExpBuckets{0.05, 2, 10}),                                          \
       F(type_apply_snapshot_predecode, {{"type", "snapshot_predecode"}}, ExpBuckets{0.05, 2, 15}),                                  \
+      F(type_apply_snapshot_total, {{"type", "snapshot_total"}}, ExpBuckets{0.2, 2, 60}),                                           \
       F(type_apply_snapshot_predecode_sst2dt, {{"type", "snapshot_predecode_sst2dt"}}, ExpBuckets{0.05, 2, 15}),                    \
+      F(type_apply_snapshot_predecode_parallel_wait,                                                                                \
+        {{"type", "snapshot_predecode_parallel_wait"}},                                                                             \
+        ExpBuckets{0.1, 2, 10}),                                                                                                    \
       F(type_apply_snapshot_predecode_upload, {{"type", "snapshot_predecode_upload"}}, ExpBuckets{0.05, 2, 10}),                    \
       F(type_apply_snapshot_flush, {{"type", "snapshot_flush"}}, ExpBuckets{0.05, 2, 10}))                                          \
     M(tiflash_raft_process_keys,                                                                                                    \
@@ -501,9 +534,12 @@ namespace DB
       Counter,                                                                                                                      \
       F(type_sche_no_pool, {"type", "sche_no_pool"}),                                                                               \
       F(type_sche_no_slot, {"type", "sche_no_slot"}),                                                                               \
+      F(type_sche_no_ru, {"type", "sche_no_ru"}),                                                                                   \
       F(type_sche_no_segment, {"type", "sche_no_segment"}),                                                                         \
+      F(type_sche_active_segment_limit, {"type", "sche_active_segment_limit"}),                                                     \
       F(type_sche_from_cache, {"type", "sche_from_cache"}),                                                                         \
       F(type_sche_new_task, {"type", "sche_new_task"}),                                                                             \
+      F(type_ru_exhausted, {"type", "ru_exhausted"}),                                                                               \
       F(type_add_cache_succ, {"type", "add_cache_succ"}),                                                                           \
       F(type_add_cache_stale, {"type", "add_cache_stale"}),                                                                         \
       F(type_get_cache_miss, {"type", "get_cache_miss"}),                                                                           \
@@ -860,11 +896,17 @@ struct MetricFamily
     T & get(size_t idx = 0) { return *(metrics[idx]); }
     T & get(size_t idx, const String & resource_group_name)
     {
-        if (metrics_map.find(resource_group_name) == metrics_map.end())
         {
-            addMetricsForResourceGroup(resource_group_name);
+            std::shared_lock lock(resource_group_metrics_mu);
+            if (resource_group_metrics_map.find(resource_group_name) != resource_group_metrics_map.end())
+                return *(resource_group_metrics_map[resource_group_name][idx]);
         }
-        return *(metrics_map[resource_group_name][idx]);
+
+        std::lock_guard lock(resource_group_metrics_mu);
+        if (resource_group_metrics_map.find(resource_group_name) == resource_group_metrics_map.end())
+            addMetricsForResourceGroup(resource_group_name);
+
+        return *(resource_group_metrics_map[resource_group_name][idx]);
     }
 
 private:
@@ -883,14 +925,15 @@ private:
             auto & metric = MetricTrait::add(*store_family, resource_group_name, MetricArgType{});
             metrics_temp.emplace_back(&metric);
         }
-        metrics_map[resource_group_name] = metrics_temp;
+        resource_group_metrics_map[resource_group_name] = metrics_temp;
     }
 
     std::vector<T *> metrics;
     prometheus::Family<T> * store_family;
     std::vector<MetricArgType> store_args;
     // <resource_group_name, metrics>
-    std::unordered_map<String, std::vector<T *>> metrics_map;
+    std::shared_mutex resource_group_metrics_mu;
+    std::unordered_map<String, std::vector<T *>> resource_group_metrics_map;
 };
 
 /// Centralized registry of TiFlash metrics.
